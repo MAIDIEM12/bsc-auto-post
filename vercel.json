@@ -1,4 +1,4 @@
-json{
+{
   "crons": [
     {
       "path": "/api/cron",
