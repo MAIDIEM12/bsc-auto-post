@@ -216,12 +216,15 @@ export default async function handler(req, res) {
 
       logs.push(`\n📁 Xử lý mới: ${folder.name}`);
 
-      // Lấy ảnh
-      const images = await driveList(
-        `'${folder.id}' in parents and mimeType contains 'image/' and trashed=false`,
-        "files(id,name,mimeType)"
-      );
-      if (!images.length) { logs.push("  ⚠️ Không có ảnh"); continue; }
+      // Lấy ảnh (quét cả subfolder cấp 2)
+        const subfolders = await driveList(`'${folder.id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+        const searchIds = subfolders.length ? subfolders.map(f => f.id) : [folder.id];
+        let images = [];
+        for (const fid of searchIds) {
+          const imgs = await driveList(`'${fid}' in parents and mimeType contains 'image/' and trashed=false`, "files(id,name,mimeType)");
+          images = images.concat(imgs);
+        }
+        if (!images.length) { logs.push("  ⚠️ Không có ảnh"); continue; }
       logs.push(`  📸 ${images.length} ảnh`);
 
       // Vision AI phân loại
