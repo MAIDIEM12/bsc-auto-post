@@ -186,7 +186,7 @@ async function publishFB(project) {
 
 export default async function handler(req, res) {
   // Bảo vệ cron bằng secret key
-  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+ if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}` && req.query.secret !== process.env.CRON_SECRET) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
