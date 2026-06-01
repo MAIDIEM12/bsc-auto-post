@@ -14,17 +14,6 @@ const CONFIG = {
   POST_MINUTE: 30,
 };
 
-const BSC_SAMPLES = `
-Bài mẫu 1 (Elleair - Activation):
-"ELLEAIR – LAN TỎA CHUẨN MỰC CHĂM SÓC TỪNG NGÀY
-Trải dài khắp mọi miền đất nước, Elleair không chỉ hiện diện tại các điểm bán mà còn để lại dấu ấn với đội ngũ PG của BSC xịn xò, luôn tươi cười, tận tâm và chuyên nghiệp trong từng chi tiết.
-Cảm ơn Elleair đã luôn tin tưởng lựa chọn Blue Sky Corporation."
-
-Bài mẫu 2 (Monster Energy - Event):
-"Săn quà chất, nạp năng lượng đỉnh – Monster Energy đổ bộ rồi đây!
-Bùng nổ năng lượng ngay tại giữa sân trường cùng những lon nước tăng lực Monster Energy mát lạnh, sảng khoái.
-Blue Sky Corp. đồng hành cùng Monster Energy, mang đến trải nghiệm đậm chất sinh viên tự do, hết mình!"`;
-
 // ── Helpers ──────────────────────────────────────────────────
 
 async function driveList(q, fields = "files(id,name,createdTime)") {
@@ -69,34 +58,50 @@ function selectImages(images, max = 5) {
 }
 
 async function groqCaption(info, imageCount) {
-  const prompt = `Bạn là copywriter của Blue Sky Corporation — agency BTL hàng đầu Việt Nam.
+  // Tên thương hiệu — lấy từ tên folder, giữ nguyên chính tả
+  const brandRaw = info.brand.trim();
+  // Hashtag: bỏ dấu cách, giữ nguyên chữ hoa/thường của tên brand
+  const brandTag = brandRaw.replace(/\s+/g, "");
 
-GIỌNG VĂN BSC:${BSC_SAMPLES}
+  const prompt = `Bạn là copywriter của Blue Sky Corporation.
 
-DỰ ÁN: Brand=${info.brand}, Loại=${info.type}, Thời gian=${info.period}
-Bộ ảnh có ${imageCount} ảnh ghi lại hoạt động.
+Nhiệm vụ: Viết caption cho dự án brand activation/sampling/event của thương hiệu "${brandRaw}".
 
-Viết caption theo format:
-1. TENBRAND – TAGLINE (IN HOA)
-2. 2-3 dòng mô tả: giọng ấm áp, tự hào, gần gũi, nhắc tên brand + BSC
-3. Cảm ơn/kêu gọi
-4. --------------------
-   Website: www.blueskycorp.com.vn
-   Mail: info@blueskycorp.com.vn
-   #BlueSkyCorporation #Agency #event #activation #sampling #belowtheline #${info.brand.replace(/\s+/g,"")}
+YÊU CẦU BẮT BUỘC — chỉ được viết đúng theo mẫu sau, không thêm bất kỳ câu chữ nào khác:
 
-Yêu cầu quan trọng: Viết đúng chính tả tiếng Việt. Không dùng từ tiếng Anh/nước ngoài trong câu văn, TRỪ tên nhãn hàng và tên thương hiệu. Giọng văn tự nhiên, ấm áp, chuyên nghiệp.
-Chỉ trả về caption, KHÔNG giải thích.`;
+${brandRaw} – [Từ khóa mô tả không gian/hoạt động ngắn gọn]. #BlueSkyCorporation #Agency #Activation #Sampling #${brandTag}
+
+Quy tắc:
+- "[Từ khóa mô tả không gian/hoạt động ngắn gọn]" là 3–7 từ tiếng Việt mô tả hoạt động/sự kiện/không gian của thương hiệu này (ví dụ: "Bừng sáng tại điểm bán", "Lan tỏa năng lượng tích cực", "Đồng hành cùng người tiêu dùng").
+- Giữ nguyên tên thương hiệu "${brandRaw}" — không viết tắt, không thay đổi.
+- TUYỆT ĐỐI không viết thêm bất kỳ câu, đoạn văn, lời giải thích nào ngoài mẫu trên.
+- Chỉ trả về đúng 1 dòng caption theo mẫu.`;
 
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${CONFIG.GROQ_API_KEY}` },
-    body: JSON.stringify({ model: "llama-3.1-8b-instant", messages: [{ role: "user", content: prompt }], max_tokens: 500 }),
+    body: JSON.stringify({
+      model: "llama-3.1-8b-instant",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 120,
+      temperature: 0.4,
+    }),
   });
   const d = await r.json();
   if (d.error) throw new Error("Groq: " + d.error.message);
-  return d.choices?.[0]?.message?.content?.trim() ||
-    `${info.brand.toUpperCase()} – ĐỒNG HÀNH CÙNG BSC\n\nCảm ơn ${info.brand}!\n\n--------------------\n Website: www.blueskycorp.com.vn\n Mail: info@blueskycorp.com.vn\n#BlueSkyCorporation #Agency #event #activation #sampling #belowtheline #${info.brand.replace(/\s+/g,"")}`;
+
+  let caption = d.choices?.[0]?.message?.content?.trim() || "";
+
+  // Kiểm tra caption trả về đúng mẫu — nếu AI viết thừa thì dùng fallback chuẩn
+  const validPattern = new RegExp(`^${brandRaw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*–.+#BlueSkyCorporation`, "i");
+  if (!validPattern.test(caption)) {
+    caption = `${brandRaw} – Lan tỏa năng lượng tích cực tại điểm bán. #BlueSkyCorporation #Agency #Activation #Sampling #${brandTag}`;
+  }
+
+  // Đảm bảo chỉ lấy 1 dòng đầu tiên (cắt mọi nội dung thừa)
+  caption = caption.split("\n")[0].trim();
+
+  return caption;
 }
 
 // Gửi 1 email tổng hợp tất cả bài
@@ -120,7 +125,7 @@ async function sendBatchEmail(projects) {
           <b style="color:#1565C0;font-size:15px;">${p.folderName}</b>
         </div>
         <div style="margin-bottom:8px;">${imgHtml || '<span style="color:#999;font-size:12px;">Ảnh sẽ hiển thị khi đăng</span>'}</div>
-        <div style="font-size:12px;color:#555;background:#f8f9ff;padding:10px;border-radius:6px;border-left:3px solid #1565C0;white-space:pre-wrap;max-height:80px;overflow:hidden;">${p.caption?.substring(0, 150)}...</div>
+        <div style="font-size:12px;color:#555;background:#f8f9ff;padding:10px;border-radius:6px;border-left:3px solid #1565C0;white-space:pre-wrap;">${p.caption}</div>
         <div style="margin-top:10px;">
           <a href="${previewUrl}?token=${p.approvalToken}" style="display:inline-block;background:#1565C0;color:#fff;padding:8px 16px;border-radius:6px;text-decoration:none;font-size:13px;margin-right:6px;">👁️ Xem đầy đủ & Sửa</a>
           <a href="${approveUrl}" style="display:inline-block;background:#2e7d32;color:#fff;padding:8px 16px;border-radius:6px;text-decoration:none;font-size:13px;">✅ Duyệt nhanh</a>
@@ -233,7 +238,7 @@ export default async function handler(req, res) {
       logs.push(`  ✍️ Đang tạo caption...`);
       const info = parseName(folder.name);
       const caption = await groqCaption(info, images.length);
-      logs.push(`  ✅ Caption xong`);
+      logs.push(`  ✅ Caption: ${caption}`);
 
       const token = Buffer.from(`${folder.id}_${Date.now()}`).toString("base64url");
       const project = {
@@ -241,7 +246,7 @@ export default async function handler(req, res) {
         selectedImages: selected, caption, approvalToken: token,
         status: "pending", createdAt: now.toISOString(),
       };
-      await kv.set(`project:${token}`, project, { ex: 60 * 60 * 24 * 30 }); // lưu 30 ngày
+      await kv.set(`project:${token}`, project, { ex: 60 * 60 * 24 * 30 });
       await kv.set(`project:folder:${folder.id}`, token, { ex: 60 * 60 * 24 * 30 });
       newProjects.push(project);
     }
