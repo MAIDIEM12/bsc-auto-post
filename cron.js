@@ -36,13 +36,31 @@ async function driveList(q, fields = "files(id,name,createdTime)") {
   return d.files || [];
 }
 
+// Quét đệ quy tất cả subfolder — khai báo ở TOP LEVEL
+async function scanFolderForImages(folderId) {
+  let images = [];
+  const imgs = await driveList(
+    `'${folderId}' in parents and mimeType contains 'image/' and trashed=false`,
+    "files(id,name,mimeType)"
+  );
+  images = images.concat(imgs);
+  const subs = await driveList(
+    `'${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`
+  );
+  for (const sub of subs) {
+    const subImgs = await scanFolderForImages(sub.id);
+    images = images.concat(subImgs);
+  }
+  return images;
+}
+
 function parseName(name) {
   const p = name.split("_");
   return { brand: p[0] || "Brand", type: p[1] || "Event", period: p.slice(2).join(" ") };
 }
 
-// Chọn ảnh đơn giản — lấy đều từ đầu/giữa/cuối để kể câu chuyện
 function selectImages(images, max = 5) {
+  if (!images || images.length === 0) return [];
   if (images.length <= max) return images;
   const selected = [];
   const step = Math.floor(images.length / max);
@@ -87,11 +105,13 @@ async function sendEmail(project) {
   const approveUrl = `${CONFIG.BASE_URL}/api/approve?token=${approvalToken}&action=approve`;
   const rejectUrl  = `${CONFIG.BASE_URL}/api/approve?token=${approvalToken}&action=reject`;
 
-  const imgHtml = selectedImages.map((img, i) => `
-    <div style="display:inline-block;margin:6px;text-align:center;">
-      <img src="https://drive.google.com/thumbnail?id=${img.id}&sz=w250" style="width:180px;height:130px;object-fit:cover;border-radius:6px;"/>
-      <div style="font-size:11px;color:#666;margin-top:3px;">${i+1}. ${img.name}</div>
-    </div>`).join("");
+  const imgHtml = selectedImages && selectedImages.length > 0
+    ? selectedImages.map((img, i) => `
+      <div style="display:inline-block;margin:6px;text-align:center;">
+        <img src="https://drive.google.com/thumbnail?id=${img.id}&sz=w250" style="width:180px;height:130px;object-fit:cover;border-radius:6px;"/>
+        <div style="font-size:11px;color:#666;margin-top:3px;">${i+1}. ${img.name}</div>
+      </div>`).join("")
+    : `<p style="color:#999;text-align:center;font-size:13px;">Ảnh sẽ được lấy từ Drive khi đăng bài</p>`;
 
   const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"/></head>
 <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
@@ -103,7 +123,7 @@ async function sendEmail(project) {
       <b style="color:#1565C0;font-size:16px;">${folderName}</b>
     </div>
     <div style="background:#fff;border-radius:8px;padding:14px;margin-bottom:14px;text-align:center;">
-      <div style="font-size:11px;color:#888;font-weight:700;margin-bottom:10px;">📷 ${selectedImages.length} ẢNH ĐẠI DIỆN</div>
+      <div style="font-size:11px;color:#888;font-weight:700;margin-bottom:10px;">📷 ${selectedImages ? selectedImages.length : 0} ẢNH ĐẠI DIỆN</div>
       ${imgHtml}
     </div>
     <div style="background:#fff;border-radius:8px;padding:14px;margin-bottom:20px;">
@@ -136,7 +156,6 @@ async function sendEmail(project) {
 async function publishFB(project) {
   const { selectedImages, caption } = project;
   const photoIds = [];
-
   for (const img of selectedImages) {
     const params = new URLSearchParams({
       url: `https://drive.google.com/thumbnail?id=${img.id}&sz=w1200`,
@@ -148,12 +167,10 @@ async function publishFB(project) {
     if (d.id) photoIds.push(d.id);
     else throw new Error("Upload ảnh lỗi: " + JSON.stringify(d.error));
   }
-
   const body = new URLSearchParams();
   body.append("message", caption);
   body.append("access_token", CONFIG.FB_PAGE_TOKEN);
   photoIds.forEach(id => body.append("attached_media[]", JSON.stringify({ media_fbid: id })));
-
   const r = await fetch(`https://graph.facebook.com/v19.0/${CONFIG.FB_PAGE_ID}/feed`, { method: "POST", body });
   const d = await r.json();
   if (d.id) return d.id;
@@ -174,7 +191,6 @@ export default async function handler(req, res) {
   const logs = [];
 
   try {
-    // ── 1. Quét folder Drive ──────────────────────────────────
     logs.push("🔍 Quét Google Drive...");
     const folders = await driveList(`'${CONFIG.DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
     logs.push(`   Tìm thấy ${folders.length} folder`);
@@ -190,35 +206,19 @@ export default async function handler(req, res) {
 
       logs.push(`📁 Xử lý: ${folder.name}`);
 
-      // Lấy ảnh — quét tất cả subfolder đệ quy
-      let images = [];
-      async function scanFolder(fid) {
-        const imgs = await driveList(`'${fid}' in parents and mimeType contains 'image/' and trashed=false`, "files(id,name,mimeType)");
-        images = images.concat(imgs);
-        const subs = await driveList(`'${fid}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
-        for (const sub of subs) await scanFolder(sub.id);
-      }
-      await scanFolder(folder.id);
-            const imgs2 = await driveList(`'${f2.id}' in parents and mimeType contains 'image/' and trashed=false`, "files(id,name,mimeType)");
-            images = images.concat(imgs2);
-          }
-        }
-      }
+      const images = await scanFolderForImages(folder.id);
+      logs.push(`  📸 ${images.length} ảnh tìm thấy`);
 
-      if (!images.length) { logs.push(`  ⚠️ Không có ảnh trong ${folder.name}`); continue; }
-      logs.push(`  📸 ${images.length} ảnh — chọn đại diện...`);
+      if (!images.length) { logs.push(`  ⚠️ Không có ảnh`); continue; }
 
-      // Chọn ảnh đơn giản, không cần Vision API
       const selected = selectImages(images, 5);
-      logs.push(`  ✅ Chọn ${selected.length} ảnh`);
+      logs.push(`  ✅ Chọn ${selected.length} ảnh đại diện`);
 
-      // Groq viết caption
       logs.push(`  ✍️ Đang tạo caption...`);
       const info = parseName(folder.name);
       const caption = await groqCaption(info, images.length);
       logs.push(`  ✅ Caption xong`);
 
-      // Lưu KV + gửi email
       const token = Buffer.from(`${folder.id}_${Date.now()}`).toString("base64url");
       const project = {
         folderId: folder.id, folderName: folder.name, folderInfo: info,
@@ -233,7 +233,6 @@ export default async function handler(req, res) {
       logs.push(`  ✅ Email đã gửi!`);
     }
 
-    // ── 2. Đăng bài đúng lịch ────────────────────────────────
     const isPostTime = CONFIG.POST_DAYS.includes(day) && hour === CONFIG.POST_HOUR && minute < 35;
     if (isPostTime) {
       logs.push("⏰ Đúng lịch đăng bài!");
