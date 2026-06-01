@@ -229,6 +229,7 @@ export default async function handler(req, res) {
       const selected = selectImages(images, 5);
       logs.push(`  ✅ Chọn ${selected.length} ảnh đại diện`);
 
+      await new Promise(resolve => setTimeout(resolve, 2000));
       logs.push(`  ✍️ Đang tạo caption...`);
       const info = parseName(folder.name);
       const caption = await groqCaption(info, images.length);
