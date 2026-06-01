@@ -144,7 +144,7 @@ async function sendEmail(project) {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
     body: JSON.stringify({
-      from: "BSC Auto Post <noreply@blueskycorp.com.vn>",
+      from: "BSC Auto Post <onboarding@resend.dev>",
       to: [CONFIG.EMAIL_TO],
       subject: `📸 [BSC] Duyệt bài: ${folderName}`,
       html,
