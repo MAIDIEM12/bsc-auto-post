@@ -38,7 +38,7 @@ export default async function handler(req, res) {
   const project = await kv.get(`project:${token}`);
   if (!project) return res.status(404).send("<h2>Không tìm thấy bài</h2>");
 
-  // Lấy tất cả ảnh từ Drive để cho chọn lại
+  // Lấy tất cả ảnh từ Drive
   const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
   let allImages = [];
   try {
@@ -61,12 +61,12 @@ export default async function handler(req, res) {
     const isSelected = selectedIds.includes(img.id);
     return `<div style="display:inline-block;margin:6px;text-align:center;cursor:pointer;" onclick="toggleImage('${img.id}','${img.name}',this)">
       <div style="position:relative;">
-        <img src="https://drive.google.com/thumbnail?id=${img.id}&sz=w200" 
-             style="width:120px;height:90px;object-fit:cover;border-radius:6px;border:3px solid ${isSelected ? '#2e7d32' : '#ddd'};"
+        <img src="https://drive.google.com/thumbnail?id=${img.id}&sz=w200"
+             style="width:110px;height:82px;object-fit:cover;border-radius:6px;border:3px solid ${isSelected ? '#2e7d32' : '#ddd'};"
              id="img-${img.id}"/>
         <div id="check-${img.id}" style="position:absolute;top:4px;right:4px;background:${isSelected ? '#2e7d32' : 'rgba(0,0,0,0.3)'};color:#fff;border-radius:50%;width:22px;height:22px;line-height:22px;text-align:center;font-size:12px;">${isSelected ? '✓' : ''}</div>
       </div>
-      <div style="font-size:10px;color:#666;margin-top:3px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${img.name}</div>
+      <div style="font-size:10px;color:#666;margin-top:3px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${img.name}</div>
     </div>`;
   }).join("");
 
@@ -87,6 +87,106 @@ export default async function handler(req, res) {
       textarea{width:100%;padding:12px;border:1px solid #ddd;border-radius:8px;font-size:14px;line-height:1.6;resize:vertical;font-family:Arial;}
       .section-title{font-size:12px;color:#888;font-weight:700;margin-bottom:12px;}
       #save-status{color:#2e7d32;font-size:13px;margin-left:8px;display:none;}
+
+      /* ===== KÉO THẢ ===== */
+      #tray {
+        display:flex;
+        flex-wrap:wrap;
+        gap:10px;
+        min-height:100px;
+        padding:10px;
+        border:2px dashed #1565C0;
+        border-radius:10px;
+        background:#f0f6ff;
+        transition:background 0.2s;
+      }
+      #tray.drag-over {
+        background:#dbeafe;
+        border-color:#0d47a1;
+      }
+      #tray-empty {
+        color:#aaa;
+        font-size:13px;
+        width:100%;
+        text-align:center;
+        padding:20px 0;
+        pointer-events:none;
+      }
+      .tray-item {
+        position:relative;
+        cursor:grab;
+        border-radius:8px;
+        border:2px solid #1565C0;
+        background:#fff;
+        box-shadow:0 2px 6px rgba(0,0,0,0.12);
+        transition:transform 0.15s, box-shadow 0.15s, opacity 0.15s;
+        user-select:none;
+        touch-action:none;
+      }
+      .tray-item:active { cursor:grabbing; }
+      .tray-item.dragging {
+        opacity:0.4;
+        transform:scale(0.95);
+        box-shadow:0 8px 20px rgba(0,0,0,0.2);
+      }
+      .tray-item.drag-target {
+        border-color:#f57c00;
+        transform:scale(1.04);
+      }
+      .tray-item img {
+        width:100px;
+        height:76px;
+        object-fit:cover;
+        border-radius:6px;
+        display:block;
+        pointer-events:none;
+      }
+      .tray-item .order-badge {
+        position:absolute;
+        top:4px;
+        left:4px;
+        background:#1565C0;
+        color:#fff;
+        font-size:11px;
+        font-weight:700;
+        border-radius:50%;
+        width:20px;
+        height:20px;
+        line-height:20px;
+        text-align:center;
+      }
+      .tray-item .remove-btn {
+        position:absolute;
+        top:4px;
+        right:4px;
+        background:#c62828;
+        color:#fff;
+        border:none;
+        border-radius:50%;
+        width:20px;
+        height:20px;
+        font-size:12px;
+        line-height:20px;
+        text-align:center;
+        cursor:pointer;
+        padding:0;
+      }
+      .tray-item .img-name {
+        font-size:9px;
+        color:#555;
+        text-align:center;
+        padding:3px 4px;
+        max-width:100px;
+        overflow:hidden;
+        text-overflow:ellipsis;
+        white-space:nowrap;
+      }
+      .drag-hint {
+        font-size:11px;
+        color:#888;
+        margin-top:6px;
+        text-align:center;
+      }
     </style>
     </head>
     <body>
@@ -99,10 +199,19 @@ export default async function handler(req, res) {
         <p style="color:#888;font-size:13px;margin:0;">Tạo lúc: ${new Date(project.createdAt).toLocaleString("vi-VN")}</p>
       </div>
 
-      <!-- CHỌN ẢNH -->
+      <!-- KHAY ẢNH ĐÃ CHỌN — KÉO THẢ -->
       <div class="card">
-        <div class="section-title">📷 CHỌN ẢNH (click để chọn/bỏ chọn — tối đa 5 ảnh)</div>
-        <div id="selected-count" style="font-size:13px;color:#1565C0;margin-bottom:12px;">Đang chọn: ${selectedIds.length} ảnh</div>
+        <div class="section-title">🗂️ THỨ TỰ ĐĂNG (kéo thả để sắp xếp — tối đa 5 ảnh)</div>
+        <div id="tray">
+          <div id="tray-empty">Chưa chọn ảnh nào. Click vào ảnh bên dưới để thêm.</div>
+        </div>
+        <div class="drag-hint">↕ Kéo thả để đổi thứ tự · Nhấn ✕ để bỏ chọn</div>
+      </div>
+
+      <!-- CHỌN ẢNH TỪ DRIVE -->
+      <div class="card">
+        <div class="section-title">📷 TẤT CẢ ẢNH TRONG DRIVE (click để thêm/bỏ)</div>
+        <div id="selected-count" style="font-size:13px;color:#1565C0;margin-bottom:12px;">Đang chọn: 0 ảnh</div>
         <div style="max-height:320px;overflow-y:auto;border:1px solid #eee;border-radius:8px;padding:8px;">
           ${allImgGrid || '<p style="color:#999;text-align:center;">Không tải được ảnh từ Drive</p>'}
         </div>
@@ -128,27 +237,167 @@ export default async function handler(req, res) {
     <script>
       const token = "${token}";
       const allImages = ${JSON.stringify(allImages)};
+
+      // selectedImages giữ thứ tự đúng — đây là nguồn sự thật
       let selectedImages = ${JSON.stringify(project.selectedImages || [])};
 
-      function toggleImage(id, name, el) {
+      // ─── KHỞI TẠO KHAY ───────────────────────────────────────────
+      function renderTray() {
+        const tray = document.getElementById('tray');
+        const empty = document.getElementById('tray-empty');
+
+        // Xoá hết item cũ (giữ lại #tray-empty)
+        tray.querySelectorAll('.tray-item').forEach(el => el.remove());
+
+        if (selectedImages.length === 0) {
+          empty.style.display = 'block';
+        } else {
+          empty.style.display = 'none';
+          selectedImages.forEach((img, idx) => {
+            const item = document.createElement('div');
+            item.className = 'tray-item';
+            item.dataset.id = img.id;
+            item.draggable = true;
+            item.innerHTML = \`
+              <span class="order-badge">\${idx + 1}</span>
+              <img src="https://drive.google.com/thumbnail?id=\${img.id}&sz=w200" alt="\${img.name}"/>
+              <button class="remove-btn" onclick="removeFromTray('\${img.id}')">✕</button>
+              <div class="img-name">\${img.name}</div>
+            \`;
+            tray.appendChild(item);
+          });
+        }
+
+        // Cập nhật border ảnh Drive
+        allImages.forEach(img => {
+          const el = document.getElementById('img-' + img.id);
+          const check = document.getElementById('check-' + img.id);
+          if (!el) return;
+          const isSelected = selectedImages.some(s => s.id === img.id);
+          el.style.border = isSelected ? '3px solid #2e7d32' : '3px solid #ddd';
+          check.style.background = isSelected ? '#2e7d32' : 'rgba(0,0,0,0.3)';
+          check.textContent = isSelected ? '✓' : '';
+        });
+
+        document.getElementById('selected-count').textContent = 'Đang chọn: ' + selectedImages.length + ' ảnh';
+        initDragDrop();
+      }
+
+      // ─── TOGGLE ẢNH TỪ GRID ──────────────────────────────────────
+      function toggleImage(id, name) {
         const idx = selectedImages.findIndex(i => i.id === id);
-        const imgEl = document.getElementById('img-' + id);
-        const checkEl = document.getElementById('check-' + id);
         if (idx >= 0) {
           selectedImages.splice(idx, 1);
-          imgEl.style.border = '3px solid #ddd';
-          checkEl.style.background = 'rgba(0,0,0,0.3)';
-          checkEl.textContent = '';
         } else {
           if (selectedImages.length >= 5) { alert('Tối đa 5 ảnh!'); return; }
           selectedImages.push({ id, name, mimeType: 'image/jpeg' });
-          imgEl.style.border = '3px solid #2e7d32';
-          checkEl.style.background = '#2e7d32';
-          checkEl.textContent = '✓';
         }
-        document.getElementById('selected-count').textContent = 'Đang chọn: ' + selectedImages.length + ' ảnh';
+        renderTray();
       }
 
+      // ─── XOÁ KHỎI KHAY ───────────────────────────────────────────
+      function removeFromTray(id) {
+        selectedImages = selectedImages.filter(i => i.id !== id);
+        renderTray();
+      }
+
+      // ─── DRAG & DROP ─────────────────────────────────────────────
+      let dragSrcId = null;
+
+      function initDragDrop() {
+        const items = document.querySelectorAll('.tray-item');
+        const tray  = document.getElementById('tray');
+
+        items.forEach(item => {
+          // Desktop drag events
+          item.addEventListener('dragstart', e => {
+            dragSrcId = item.dataset.id;
+            item.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+          });
+          item.addEventListener('dragend', () => {
+            item.classList.remove('dragging');
+            document.querySelectorAll('.tray-item').forEach(i => i.classList.remove('drag-target'));
+          });
+          item.addEventListener('dragover', e => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            document.querySelectorAll('.tray-item').forEach(i => i.classList.remove('drag-target'));
+            if (item.dataset.id !== dragSrcId) item.classList.add('drag-target');
+          });
+          item.addEventListener('drop', e => {
+            e.preventDefault();
+            if (!dragSrcId || dragSrcId === item.dataset.id) return;
+            const srcIdx  = selectedImages.findIndex(i => i.id === dragSrcId);
+            const destIdx = selectedImages.findIndex(i => i.id === item.dataset.id);
+            if (srcIdx < 0 || destIdx < 0) return;
+            // Hoán đổi vị trí
+            const moved = selectedImages.splice(srcIdx, 1)[0];
+            selectedImages.splice(destIdx, 0, moved);
+            dragSrcId = null;
+            renderTray();
+          });
+
+          // Touch events (mobile)
+          let touchStartX, touchStartY, touchClone = null;
+
+          item.addEventListener('touchstart', e => {
+            const touch = e.touches[0];
+            dragSrcId = item.dataset.id;
+            touchStartX = touch.clientX;
+            touchStartY = touch.clientY;
+
+            // Tạo ghost cho mobile
+            touchClone = item.cloneNode(true);
+            touchClone.style.cssText = \`
+              position:fixed; opacity:0.75; pointer-events:none; z-index:9999;
+              transform:scale(1.08); transition:none;
+              left:\${touch.clientX - 55}px; top:\${touch.clientY - 50}px;
+            \`;
+            document.body.appendChild(touchClone);
+            item.style.opacity = '0.3';
+          }, { passive: true });
+
+          item.addEventListener('touchmove', e => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            if (touchClone) {
+              touchClone.style.left = (touch.clientX - 55) + 'px';
+              touchClone.style.top  = (touch.clientY - 50) + 'px';
+            }
+            // Tìm item đang hover
+            document.querySelectorAll('.tray-item').forEach(i => i.classList.remove('drag-target'));
+            const el = document.elementFromPoint(touch.clientX, touch.clientY);
+            const target = el ? el.closest('.tray-item') : null;
+            if (target && target.dataset.id !== dragSrcId) target.classList.add('drag-target');
+          }, { passive: false });
+
+          item.addEventListener('touchend', e => {
+            const touch = e.changedTouches[0];
+            if (touchClone) { touchClone.remove(); touchClone = null; }
+            item.style.opacity = '';
+            document.querySelectorAll('.tray-item').forEach(i => i.classList.remove('drag-target'));
+
+            const el = document.elementFromPoint(touch.clientX, touch.clientY);
+            const target = el ? el.closest('.tray-item') : null;
+            if (target && target.dataset.id !== dragSrcId) {
+              const srcIdx  = selectedImages.findIndex(i => i.id === dragSrcId);
+              const destIdx = selectedImages.findIndex(i => i.id === target.dataset.id);
+              if (srcIdx >= 0 && destIdx >= 0) {
+                const moved = selectedImages.splice(srcIdx, 1)[0];
+                selectedImages.splice(destIdx, 0, moved);
+              }
+            }
+            dragSrcId = null;
+            renderTray();
+          });
+        });
+
+        // Cho phép drop vào vùng tray trống
+        tray.addEventListener('dragover', e => e.preventDefault());
+      }
+
+      // ─── LƯU THAY ĐỔI ────────────────────────────────────────────
       async function saveChanges() {
         const caption = document.getElementById('caption-text').value;
         const res = await fetch('/api/edit', {
@@ -163,6 +412,9 @@ export default async function handler(req, res) {
         else { status.textContent = '❌ Lỗi lưu!'; status.style.color = '#c62828'; }
         setTimeout(() => status.style.display = 'none', 3000);
       }
+
+      // ─── KHỞI ĐỘNG ───────────────────────────────────────────────
+      renderTray();
     </script>
     </body></html>`);
 }
