@@ -8,7 +8,7 @@ const CONFIG = {
   FB_PAGE_ID: process.env.FB_PAGE_ID,
   FB_PAGE_TOKEN: process.env.FB_PAGE_TOKEN,
   EMAIL_TO: process.env.EMAIL_TO || "diem.mai@blueskycorp.com.vn",
-  BASE_URL: process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "https://bsc-auto-post.vercel.app",
+  BASE_URL: "https://bsc-auto-post.vercel.app",
   POST_DAYS: [2, 5],
   POST_HOUR: 9,
   POST_MINUTE: 30,
