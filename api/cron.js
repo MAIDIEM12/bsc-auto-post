@@ -87,7 +87,7 @@ Viết caption theo format:
    Mail: info@blueskycorp.com.vn
    #BlueSkyCorporation #Agency #event #activation #sampling #belowtheline #${info.brand.replace(/\s+/g,"")}
 
-Chỉ trả về caption, KHÔNG giải thích.`;
+Yêu cầu quan trọng: Viết đúng chính tả tiếng Việt. Không dùng từ tiếng Anh/nước ngoài trong câu văn, TRỪ tên nhãn hàng và tên thương hiệu. Giọng văn tự nhiên, ấm áp, chuyên nghiệp.Chỉ trả về caption, KHÔNG giải thích.`;
 
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
