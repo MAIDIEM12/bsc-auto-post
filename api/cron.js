@@ -1,4 +1,4 @@
-// api/cron.js — Chạy tự động, quét Drive và gửi email duyệt
+// api/cron.js — Chạy tự động, quét Drive và gửi 1 email duyệt tất cả bài/tháng
 import { kv } from "@vercel/kv";
 
 const CONFIG = {
@@ -12,7 +12,6 @@ const CONFIG = {
   POST_DAYS: [2, 5],
   POST_HOUR: 9,
   POST_MINUTE: 30,
-  MIN_PROJECTS: 3,
 };
 
 const BSC_SAMPLES = `
@@ -36,7 +35,6 @@ async function driveList(q, fields = "files(id,name,createdTime)") {
   return d.files || [];
 }
 
-// Quét đệ quy tất cả subfolder — khai báo ở TOP LEVEL
 async function scanFolderForImages(folderId) {
   let images = [];
   const imgs = await driveList(
@@ -87,7 +85,8 @@ Viết caption theo format:
    Mail: info@blueskycorp.com.vn
    #BlueSkyCorporation #Agency #event #activation #sampling #belowtheline #${info.brand.replace(/\s+/g,"")}
 
-Yêu cầu quan trọng: Viết đúng chính tả tiếng Việt. Không dùng từ tiếng Anh/nước ngoài trong câu văn, TRỪ tên nhãn hàng và tên thương hiệu. Giọng văn tự nhiên, ấm áp, chuyên nghiệp..Chỉ trả về caption, KHÔNG giải thích.`;
+Yêu cầu quan trọng: Viết đúng chính tả tiếng Việt. Không dùng từ tiếng Anh/nước ngoài trong câu văn, TRỪ tên nhãn hàng và tên thương hiệu. Giọng văn tự nhiên, ấm áp, chuyên nghiệp.
+Chỉ trả về caption, KHÔNG giải thích.`;
 
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
@@ -100,41 +99,56 @@ Yêu cầu quan trọng: Viết đúng chính tả tiếng Việt. Không dùng 
     `${info.brand.toUpperCase()} – ĐỒNG HÀNH CÙNG BSC\n\nCảm ơn ${info.brand}!\n\n--------------------\n Website: www.blueskycorp.com.vn\n Mail: info@blueskycorp.com.vn\n#BlueSkyCorporation #Agency #event #activation #sampling #belowtheline #${info.brand.replace(/\s+/g,"")}`;
 }
 
-async function sendEmail(project) {
-  const { folderName, selectedImages, caption, approvalToken } = project;
-  const approveUrl = `${CONFIG.BASE_URL}/api/approve?token=${approvalToken}&action=approve`;
-  const rejectUrl  = `${CONFIG.BASE_URL}/api/approve?token=${approvalToken}&action=reject`;
+// Gửi 1 email tổng hợp tất cả bài
+async function sendBatchEmail(projects) {
+  const previewUrl = `${CONFIG.BASE_URL}/api/preview`;
+  const now = new Date();
+  const monthYear = now.toLocaleDateString("vi-VN", { month: "long", year: "numeric" });
 
-  const imgHtml = selectedImages && selectedImages.length > 0
-    ? selectedImages.map((img, i) => `
-      <div style="display:inline-block;margin:6px;text-align:center;">
-        <img src="https://drive.google.com/thumbnail?id=${img.id}&sz=w250" style="width:180px;height:130px;object-fit:cover;border-radius:6px;"/>
-        <div style="font-size:11px;color:#666;margin-top:3px;">${i+1}. ${img.name}</div>
-      </div>`).join("")
-    : `<p style="color:#999;text-align:center;font-size:13px;">Ảnh sẽ được lấy từ Drive khi đăng bài</p>`;
+  const projectCards = projects.map((p, idx) => {
+    const imgHtml = (p.selectedImages || []).slice(0, 3).map(img => `
+      <img src="https://drive.google.com/thumbnail?id=${img.id}&sz=w150" 
+           style="width:100px;height:75px;object-fit:cover;border-radius:4px;margin:3px;display:inline-block;"/>
+    `).join("");
+
+    const approveUrl = `${CONFIG.BASE_URL}/api/approve?token=${p.approvalToken}&action=approve`;
+
+    return `
+      <div style="background:#fff;border-radius:8px;padding:16px;margin-bottom:12px;border:1px solid #e0e0e0;">
+        <div style="display:flex;align-items:center;margin-bottom:8px;">
+          <span style="background:#1565C0;color:#fff;border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;margin-right:8px;">${idx+1}</span>
+          <b style="color:#1565C0;font-size:15px;">${p.folderName}</b>
+        </div>
+        <div style="margin-bottom:8px;">${imgHtml || '<span style="color:#999;font-size:12px;">Ảnh sẽ hiển thị khi đăng</span>'}</div>
+        <div style="font-size:12px;color:#555;background:#f8f9ff;padding:10px;border-radius:6px;border-left:3px solid #1565C0;white-space:pre-wrap;max-height:80px;overflow:hidden;">${p.caption?.substring(0, 150)}...</div>
+        <div style="margin-top:10px;">
+          <a href="${previewUrl}?token=${p.approvalToken}" style="display:inline-block;background:#1565C0;color:#fff;padding:8px 16px;border-radius:6px;text-decoration:none;font-size:13px;margin-right:6px;">👁️ Xem đầy đủ & Sửa</a>
+          <a href="${approveUrl}" style="display:inline-block;background:#2e7d32;color:#fff;padding:8px 16px;border-radius:6px;text-decoration:none;font-size:13px;">✅ Duyệt nhanh</a>
+        </div>
+      </div>`;
+  }).join("");
 
   const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"/></head>
-<body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
-  <div style="background:#1565C0;color:#fff;padding:20px;border-radius:8px 8px 0 0;text-align:center;">
-    <h2 style="margin:0;">📸 BSC Auto Post — Duyệt bài</h2>
+<body style="font-family:Arial,sans-serif;max-width:650px;margin:0 auto;padding:20px;background:#f5f5f5;">
+  <div style="background:#1565C0;color:#fff;padding:24px;border-radius:12px 12px 0 0;text-align:center;">
+    <h2 style="margin:0;font-size:20px;">📸 BSC Auto Post — Duyệt bài ${monthYear}</h2>
+    <p style="margin:8px 0 0;opacity:0.85;font-size:14px;">${projects.length} bài chờ duyệt · Rải đều trong 1 tháng</p>
   </div>
-  <div style="background:#f8f9ff;padding:20px;border:1px solid #e0e0e0;">
-    <div style="background:#fff;border-radius:8px;padding:14px;margin-bottom:14px;">
-      <b style="color:#1565C0;font-size:16px;">${folderName}</b>
+
+  <div style="background:#fff;padding:20px;border-radius:0 0 12px 12px;border:1px solid #e0e0e0;">
+    <div style="background:#e8f5e9;border-radius:8px;padding:14px;margin-bottom:20px;text-align:center;">
+      <p style="margin:0;font-size:14px;color:#2e7d32;">
+        ✅ <b>Duyệt tất cả</b> để hệ thống tự đăng rải đều Thứ 3 & Thứ 6 · 
+        <a href="${previewUrl}" style="color:#1565C0;font-weight:700;">Xem tất cả tại đây →</a>
+      </p>
     </div>
-    <div style="background:#fff;border-radius:8px;padding:14px;margin-bottom:14px;text-align:center;">
-      <div style="font-size:11px;color:#888;font-weight:700;margin-bottom:10px;">📷 ${selectedImages ? selectedImages.length : 0} ẢNH ĐẠI DIỆN</div>
-      ${imgHtml}
+
+    ${projectCards}
+
+    <div style="text-align:center;margin-top:20px;padding-top:16px;border-top:1px solid #eee;">
+      <a href="${previewUrl}" style="display:inline-block;background:#1565C0;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px;">🚀 Vào trang duyệt bài đầy đủ</a>
+      <p style="color:#999;font-size:11px;margin-top:12px;">Bài chưa được duyệt sẽ không được đăng tự động.</p>
     </div>
-    <div style="background:#fff;border-radius:8px;padding:14px;margin-bottom:20px;">
-      <div style="font-size:11px;color:#888;font-weight:700;margin-bottom:8px;">✍️ CAPTION AI VIẾT</div>
-      <div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#333;background:#f8f9ff;padding:12px;border-radius:6px;border-left:4px solid #1565C0;">${caption}</div>
-    </div>
-    <div style="text-align:center;">
-      <a href="${approveUrl}" style="display:inline-block;background:#2e7d32;color:#fff;padding:14px 36px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px;margin:0 6px;">✅ DUYỆT ĐĂNG BÀI</a>
-      <a href="${rejectUrl}"  style="display:inline-block;background:#c62828;color:#fff;padding:14px 36px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px;margin:0 6px;">❌ TỪ CHỐI</a>
-    </div>
-    <p style="text-align:center;font-size:11px;color:#999;margin-top:14px;">Nếu không phản hồi, bài sẽ không được đăng.</p>
   </div>
 </body></html>`;
 
@@ -144,12 +158,12 @@ async function sendEmail(project) {
     body: JSON.stringify({
       from: "BSC Auto Post <onboarding@resend.dev>",
       to: [CONFIG.EMAIL_TO],
-      subject: `📸 [BSC] Duyệt bài: ${folderName}`,
+      subject: `📸 [BSC] Duyệt ${projects.length} bài đăng — ${monthYear}`,
       html,
     }),
   });
   const d = await r.json();
-  if (d.id) console.log("✅ Email đã gửi:", d.id);
+  if (d.id) console.log("✅ Email tổng hợp đã gửi:", d.id);
   else throw new Error("Email lỗi: " + JSON.stringify(d));
 }
 
@@ -191,16 +205,17 @@ export default async function handler(req, res) {
   const logs = [];
 
   try {
+    // ── 1. Quét tất cả folder Drive ──────────────────────────
     logs.push("🔍 Quét Google Drive...");
     const folders = await driveList(`'${CONFIG.DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
     logs.push(`   Tìm thấy ${folders.length} folder`);
 
     const pending = folders.filter(f => !f.name.startsWith("DONE_"));
-    if (pending.length < CONFIG.MIN_PROJECTS) {
-      logs.push(`⚠️ Kho ảnh còn ${pending.length} dự án (dưới mức ${CONFIG.MIN_PROJECTS})`);
-    }
+    logs.push(`   ${pending.length} folder chưa xử lý`);
 
-    for (const folder of pending.slice(0, 3)) {
+    // Xử lý TẤT CẢ folder chưa có trong KV
+    const newProjects = [];
+    for (const folder of pending) {
       const existing = await kv.get(`project:folder:${folder.id}`);
       if (existing) { logs.push(`⏭️ ${folder.name} — đã xử lý`); continue; }
 
@@ -225,17 +240,24 @@ export default async function handler(req, res) {
         selectedImages: selected, caption, approvalToken: token,
         status: "pending", createdAt: now.toISOString(),
       };
-      await kv.set(`project:${token}`, project, { ex: 60 * 60 * 24 * 7 });
-      await kv.set(`project:folder:${folder.id}`, token, { ex: 60 * 60 * 24 * 7 });
-
-      logs.push(`  📧 Gửi email duyệt...`);
-      await sendEmail(project);
-      logs.push(`  ✅ Email đã gửi!`);
+      await kv.set(`project:${token}`, project, { ex: 60 * 60 * 24 * 30 }); // lưu 30 ngày
+      await kv.set(`project:folder:${folder.id}`, token, { ex: 60 * 60 * 24 * 30 });
+      newProjects.push(project);
     }
 
+    // Gửi 1 email tổng hợp nếu có bài mới
+    if (newProjects.length > 0) {
+      logs.push(`\n📧 Gửi 1 email tổng hợp ${newProjects.length} bài...`);
+      await sendBatchEmail(newProjects);
+      logs.push(`✅ Email đã gửi!`);
+    } else {
+      logs.push(`ℹ️ Không có bài mới cần xử lý`);
+    }
+
+    // ── 2. Đăng bài đúng lịch Thứ 3 & Thứ 6 lúc 9:30 ───────
     const isPostTime = CONFIG.POST_DAYS.includes(day) && hour === CONFIG.POST_HOUR && minute < 35;
     if (isPostTime) {
-      logs.push("⏰ Đúng lịch đăng bài!");
+      logs.push("\n⏰ Đúng lịch đăng bài!");
       const keys = await kv.keys("project:*");
       for (const key of keys) {
         if (key.includes(":folder:")) continue;
