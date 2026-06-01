@@ -1,4 +1,4 @@
-// api/cron.js — Chạy tự động, quét Drive và gửi email duyệt
+// api/cron.js v3 — Chạy tự động, quét Drive và gửi email duyệt
 import { kv } from "@vercel/kv";
 
 const CONFIG = {
