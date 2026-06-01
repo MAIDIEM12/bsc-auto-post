@@ -280,6 +280,28 @@ function buildBatchEmail(batch, secret) {
 
 // ── Quét Drive (giữ nguyên logic cũ) ─────────────────────────────────────────
 async function scanDriveFolders() {
-  // Giữ nguyên code quét Drive từ file cron.js gốc của chị
-  return [];
+ const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+  const DRIVE_FOLDER_ID = process.env.DRIVE_FOLDER_ID;
+  if (!GOOGLE_API_KEY || !DRIVE_FOLDER_ID) return [];
+  
+  const folderIds = DRIVE_FOLDER_ID.split(',').map(id => id.trim());
+  const results = [];
+  
+  for (const folderId of folderIds) {
+    try {
+      const url = `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+mimeType+contains+'image/'+and+trashed=false&key=${GOOGLE_API_KEY}&fields=files(id,name,mimeType)&pageSize=50`;
+      const r = await fetch(url);
+      const data = await r.json();
+      if (data.error) continue;
+      const images = (data.files || []).map(f => ({
+        url: `https://drive.google.com/uc?export=view&id=${f.id}`,
+        id: f.id, name: f.name
+      }));
+      if (images.length > 0) {
+        results.push({ name: folderId, images, brand: '', kpi: '', region: 'TP. HCM' });
+      }
+    } catch(e) { continue; }
+  }
+  return results;
+  
 }
