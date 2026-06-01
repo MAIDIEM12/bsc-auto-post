@@ -190,18 +190,15 @@ export default async function handler(req, res) {
 
       logs.push(`📁 Xử lý: ${folder.name}`);
 
-      // Lấy ảnh — quét subfolder cấp 1 và 2
+      // Lấy ảnh — quét tất cả subfolder đệ quy
       let images = [];
-      const sub1 = await driveList(`'${folder.id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
-      const searchIds = sub1.length ? sub1.map(f => f.id) : [folder.id];
-
-      for (const fid of searchIds) {
+      async function scanFolder(fid) {
         const imgs = await driveList(`'${fid}' in parents and mimeType contains 'image/' and trashed=false`, "files(id,name,mimeType)");
         images = images.concat(imgs);
-        // Quét thêm cấp 2
-        if (sub1.length) {
-          const sub2 = await driveList(`'${fid}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
-          for (const f2 of sub2) {
+        const subs = await driveList(`'${fid}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+        for (const sub of subs) await scanFolder(sub.id);
+      }
+      await scanFolder(folder.id);
             const imgs2 = await driveList(`'${f2.id}' in parents and mimeType contains 'image/' and trashed=false`, "files(id,name,mimeType)");
             images = images.concat(imgs2);
           }
