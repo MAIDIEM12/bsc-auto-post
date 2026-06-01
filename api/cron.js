@@ -53,8 +53,8 @@ async function scanFolderForImages(folderId) {
 }
 
 function parseName(name) {
-  const p = name.split("_");
-  return { brand: p[0] || "Brand", type: p[1] || "Event", period: p.slice(2).join(" ") };
+  const cleanName = name.replace(/-\d{8}T[\w-]+/g, "").replace(/_/g, " ").trim();
+  return { brand: cleanName, type: "Event", period: "" };
 }
 
 function selectImages(images, max = 5) {
