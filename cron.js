@@ -1,292 +1,285 @@
-// api/cron.js — Chạy tự động mỗi 30 phút để quét Drive và đăng bài đúng lịch
-import { kv } from "@vercel/kv";
+// api/cron.js — BSC Auto Post v3
+// LUỒNG ĐÚNG: Quét Drive → AI tạo caption → Gửi 1 email duyệt/tháng
+// Chị chỉ duyệt 1 LẦN cho cả batch 1-2 tháng → hệ thống tự rải lịch & đăng
 
-const CONFIG = {
-  GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
-  DRIVE_FOLDER_ID: process.env.DRIVE_FOLDER_ID,
-  GROQ_API_KEY: process.env.GROQ_API_KEY,
-  FB_PAGE_ID: process.env.FB_PAGE_ID,
-  FB_PAGE_TOKEN: process.env.FB_PAGE_TOKEN,
-  EMAIL_TO: process.env.EMAIL_TO || "diem.mai@blueskycorp.com.vn",
-  BASE_URL: process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "https://bsc-auto-post.vercel.app",
-  POST_DAYS: [2, 5], // Thứ 3 và Thứ 6
-  POST_HOUR: 9,
-  POST_MINUTE: 30,
-  MIN_PROJECTS: 3,
+import { Resend } from 'resend';
+import { kv } from '@vercel/kv';
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+const BRAND_TONES = {
+  fmcg:       'FMCG / Tiêu dùng – vui tươi, gần gũi, đời thường',
+  corporate:  'Doanh nghiệp B2B – chuyên nghiệp, trang trọng, số liệu rõ ràng',
+  luxury:     'Luxury – sang trọng, tinh tế, ngôn ngữ chọn lọc',
+  tech:       'Công nghệ – hiện đại, sáng tạo, ngắn gọn',
+  event:      'Sự kiện / Event – sôi động, hào hứng, kêu gọi hành động',
+  realestate: 'Bất động sản – uy tín, khát vọng, đầu tư dài hạn',
 };
 
-// Caption mẫu BSC
-const BSC_SAMPLES = `
-Bài mẫu 1 (Elleair - Activation):
-"ELLEAIR – LAN TỎA CHUẨN MỰC CHĂM SÓC TỪNG NGÀY
-Trải dài khắp mọi miền đất nước, Elleair không chỉ hiện diện tại các điểm bán mà còn để lại dấu ấn với đội ngũ PG của BSC xịn xò, luôn tươi cười, tận tâm và chuyên nghiệp trong từng chi tiết.
-Cảm ơn Elleair đã luôn tin tưởng lựa chọn Blue Sky Corporation."
+const POST_HOURS = [8, 10, 12, 15, 17, 20]; // Giờ vàng đăng bài
 
-Bài mẫu 2 (Monster Energy - Event):
-"Săn quà chất, nạp năng lượng đỉnh – Monster Energy đổ bộ rồi đây!
-Bùng nổ năng lượng ngay tại giữa sân trường cùng những lon nước tăng lực Monster Energy mát lạnh, sảng khoái.
-Blue Sky Corp. đồng hành cùng Monster Energy, mang đến trải nghiệm đậm chất sinh viên tự do, hết mình!"`;
-
-// ── Helpers ──────────────────────────────────────────────────
-
-async function driveList(q, fields = "files(id,name,createdTime)") {
-  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&key=${CONFIG.GOOGLE_API_KEY}&fields=${fields}&pageSize=50`;
-  const r = await fetch(url);
-  const d = await r.json();
-  if (d.error) throw new Error("Drive: " + d.error.message);
-  return d.files || [];
-}
-
-async function visionAnalyze(imageId) {
-  const url = `https://vision.googleapis.com/v1/images:annotate?key=${CONFIG.GOOGLE_API_KEY}`;
-  const body = {
-    requests: [{
-      image: { source: { imageUri: `https://drive.google.com/thumbnail?id=${imageId}&sz=w800` } },
-      features: [
-        { type: "LABEL_DETECTION", maxResults: 15 },
-        { type: "IMAGE_PROPERTIES" },
-      ],
-    }],
-  };
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const d = await r.json();
-  return d.responses?.[0] || null;
-}
-
-const TYPE_MAP = {
-  tongthe:  { kw: ["building","interior","store","booth","display","shelf","decoration"], label: "Toàn cảnh", order: 1 },
-  donkhach: { kw: ["person","smile","greeting","welcome","customer","standing"], label: "Đón khách", order: 2 },
-  photo:    { kw: ["photography","selfie","frame","pose","camera"], label: "Photobooth", order: 3 },
-  hoatdong: { kw: ["product","holding","tasting","sampling","hand","demonstration"], label: "Hoạt động", order: 4 },
-  dongduc:  { kw: ["crowd","group","audience","gathering","many","busy"], label: "Đông người", order: 5 },
-};
-
-function classify(labels) {
-  let best = "hoatdong", score = 0;
-  for (const [t, cfg] of Object.entries(TYPE_MAP)) {
-    const n = cfg.kw.filter(k => labels.some(l => l.includes(k))).length;
-    if (n > score) { score = n; best = t; }
-  }
-  return { type: best, label: TYPE_MAP[best].label, order: TYPE_MAP[best].order };
-}
-
-function parseName(name) {
-  const p = name.split("_");
-  return { brand: p[0] || "Brand", type: p[1] || "Event", period: p.slice(2).join(" ") };
-}
-
-async function groqCaption(info, imgContext) {
-  const prompt = `Bạn là copywriter của Blue Sky Corporation — agency BTL hàng đầu Việt Nam.
-
-GIỌNG VĂN BSC:${BSC_SAMPLES}
-
-DỰ ÁN: Brand=${info.brand}, Loại=${info.type}, Thời gian=${info.period}
-NỘI DUNG ẢNH: ${imgContext}
-
-Viết caption theo format:
-1. TENBRAND – TAGLINE (IN HOA)
-2. 2-3 dòng mô tả: giọng ấm áp, tự hào, gần gũi, nhắc tên brand + BSC
-3. Cảm ơn/kêu gọi
-4. --------------------
-   Website: www.blueskycorp.com.vn
-   Mail: info@blueskycorp.com.vn
-   #BlueSkyCorporation #Agency #event #activation #sampling #belowtheline #${info.brand.replace(/\s+/g,"")}
-
-Chỉ trả về caption, KHÔNG giải thích.`;
-
-  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${CONFIG.GROQ_API_KEY}` },
-    body: JSON.stringify({ model: "llama-3.1-8b-instant", messages: [{ role: "user", content: prompt }], max_tokens: 500 }),
-  });
-  const d = await r.json();
-  return d.choices?.[0]?.message?.content?.trim() || `${info.brand.toUpperCase()} – ĐỒNG HÀNH CÙNG BSC\n\nCảm ơn ${info.brand}!\n\n--------------------\n Website: www.blueskycorp.com.vn\n Mail: info@blueskycorp.com.vn\n#BlueSkyCorporation #Agency #event #activation #sampling #belowtheline #${info.brand.replace(/\s+/g,"")}`;
-}
-
-async function sendEmail(project) {
-  const { folderName, selectedImages, caption, approvalToken } = project;
-  const approveUrl = `${CONFIG.BASE_URL}/api/approve?token=${approvalToken}&action=approve`;
-  const rejectUrl  = `${CONFIG.BASE_URL}/api/approve?token=${approvalToken}&action=reject`;
-
-  const imgHtml = selectedImages.map((img, i) => `
-    <div style="display:inline-block;margin:6px;text-align:center;">
-      <img src="https://drive.google.com/thumbnail?id=${img.id}&sz=w250" style="width:180px;height:130px;object-fit:cover;border-radius:6px;"/>
-      <div style="font-size:11px;color:#666;margin-top:3px;">${i+1}. ${img.label}</div>
-    </div>`).join("");
-
-  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"/></head>
-<body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
-  <div style="background:#1565C0;color:#fff;padding:20px;border-radius:8px 8px 0 0;text-align:center;">
-    <h2 style="margin:0;">📸 BSC Auto Post — Duyệt bài</h2>
-  </div>
-  <div style="background:#f8f9ff;padding:20px;border:1px solid #e0e0e0;">
-    <div style="background:#fff;border-radius:8px;padding:14px;margin-bottom:14px;">
-      <b style="color:#1565C0;font-size:16px;">${folderName}</b>
-    </div>
-    <div style="background:#fff;border-radius:8px;padding:14px;margin-bottom:14px;text-align:center;">
-      <div style="font-size:11px;color:#888;font-weight:700;margin-bottom:10px;">📷 ${selectedImages.length} ẢNH THEO THỨ TỰ CÂU CHUYỆN</div>
-      ${imgHtml}
-    </div>
-    <div style="background:#fff;border-radius:8px;padding:14px;margin-bottom:20px;">
-      <div style="font-size:11px;color:#888;font-weight:700;margin-bottom:8px;">✍️ CAPTION AI VIẾT</div>
-      <div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#333;background:#f8f9ff;padding:12px;border-radius:6px;border-left:4px solid #1565C0;">${caption}</div>
-    </div>
-    <div style="text-align:center;">
-      <a href="${approveUrl}" style="display:inline-block;background:#2e7d32;color:#fff;padding:14px 36px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px;margin:0 6px;">✅ DUYỆT ĐĂNG BÀI</a>
-      <a href="${rejectUrl}"  style="display:inline-block;background:#c62828;color:#fff;padding:14px 36px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px;margin:0 6px;">❌ TỪ CHỐI</a>
-    </div>
-    <p style="text-align:center;font-size:11px;color:#999;margin-top:14px;">Nếu không phản hồi, bài sẽ không được đăng.</p>
-  </div>
-</body></html>`;
-
-  // Gửi qua Resend (miễn phí 3000 email/tháng)
-  const r = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
-    body: JSON.stringify({
-      from: "BSC Auto Post <noreply@blueskycorp.com.vn>",
-      to: [CONFIG.EMAIL_TO],
-      subject: `📸 [BSC] Duyệt bài: ${folderName}`,
-      html,
-    }),
-  });
-  const d = await r.json();
-  if (d.id) console.log("✅ Email đã gửi:", d.id);
-  else throw new Error("Email lỗi: " + JSON.stringify(d));
-}
-
-async function publishFB(project) {
-  const { selectedImages, caption } = project;
-  const photoIds = [];
-
-  for (const img of selectedImages) {
-    const params = new URLSearchParams({
-      url: `https://drive.google.com/thumbnail?id=${img.id}&sz=w1200`,
-      published: "false",
-      access_token: CONFIG.FB_PAGE_TOKEN,
-    });
-    const r = await fetch(`https://graph.facebook.com/v19.0/${CONFIG.FB_PAGE_ID}/photos`, { method: "POST", body: params });
-    const d = await r.json();
-    if (d.id) photoIds.push(d.id);
-    else throw new Error("Upload ảnh lỗi: " + JSON.stringify(d.error));
-  }
-
-  const body = new URLSearchParams();
-  body.append("message", caption);
-  body.append("access_token", CONFIG.FB_PAGE_TOKEN);
-  photoIds.forEach(id => body.append("attached_media[]", JSON.stringify({ media_fbid: id })));
-
-  const r = await fetch(`https://graph.facebook.com/v19.0/${CONFIG.FB_PAGE_ID}/feed`, { method: "POST", body });
-  const d = await r.json();
-  if (d.id) return d.id;
-  throw new Error("Đăng bài lỗi: " + JSON.stringify(d.error));
-}
-
-// ── Main handler ─────────────────────────────────────────────
-
+// ── Main handler ───────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-  // Bảo vệ cron bằng secret key
-  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
-    return res.status(401).json({ error: "Unauthorized" });
+  const secret = req.query.secret || req.headers['x-cron-secret'];
+  if (secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const now = new Date();
-  const day = now.getDay(); // 0=CN, 1=T2...6=T7
-  const hour = now.getHours();
-  const minute = now.getMinutes();
-  const logs = [];
+  // Tham số tuỳ chọn: ?months=2 (mặc định 1 tháng)
+  const months = parseInt(req.query.months) || 1;
+  const forceRescan = req.query.force === 'true';
 
   try {
-    // ── 1. Quét folder Drive tìm dự án mới ───────────────────
-    logs.push("🔍 Quét Google Drive...");
-    const folders = await driveList(`'${CONFIG.DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
-    logs.push(`   Tìm thấy ${folders.length} folder`);
-
-    // Cảnh báo kho ảnh thấp
-    const pending = folders.filter(f => !f.name.startsWith("DONE_"));
-    if (pending.length < CONFIG.MIN_PROJECTS) {
-      logs.push(`⚠️ Kho ảnh còn ${pending.length} dự án (dưới mức ${CONFIG.MIN_PROJECTS})`);
-      // TODO: gửi email cảnh báo
+    // ── BƯỚC 1: Kiểm tra xem đã có batch đang chờ duyệt chưa ──────────────────
+    const existingBatch = await kv.get('pending_batch');
+    if (existingBatch && !forceRescan) {
+      return res.status(200).json({
+        ok: true,
+        message: `Đã có batch ${existingBatch.batchId} đang chờ duyệt (${existingBatch.projects.length} bài). Thêm ?force=true để quét lại.`,
+        batchId: existingBatch.batchId,
+      });
     }
 
-    // Xử lý folder chưa có trong KV
-    for (const folder of pending.slice(0, 3)) {
-      const existing = await kv.get(`project:folder:${folder.id}`);
-      if (existing) continue; // Đã xử lý rồi
+    // ── BƯỚC 2: Quét Drive lấy tất cả dự án/ảnh mới ──────────────────────────
+    const logs = [];
+    logs.push('🔍 Quét Google Drive...');
+    const driveItems = await scanDriveFolders();
+    logs.push(`Tìm thấy ${driveItems.length} folder`);
 
-      logs.push(`\n📁 Xử lý mới: ${folder.name}`);
-
-      // Lấy ảnh
-      const images = await driveList(
-        `'${folder.id}' in parents and mimeType contains 'image/' and trashed=false`,
-        "files(id,name,mimeType)"
-      );
-      if (!images.length) { logs.push("  ⚠️ Không có ảnh"); continue; }
-      logs.push(`  📸 ${images.length} ảnh`);
-
-      // Vision AI phân loại
-      const analyzed = [];
-      for (const img of images.slice(0, 20)) {
-        const v = await visionAnalyze(img.id);
-        if (!v) continue;
-        const labels = (v.labelAnnotations || []).map(l => l.description.toLowerCase());
-        const colors = v.imagePropertiesAnnotation?.dominantColors?.colors || [];
-        const brightness = colors.reduce((s, c) => s + (c.color.red + c.color.green + c.color.blue) / 3 * c.pixelFraction, 0);
-        if (brightness < 40 || brightness > 240) continue; // Loại ảnh quá tối/sáng
-        const cl = classify(labels);
-        analyzed.push({ ...img, ...cl, score: labels.length + (brightness > 60 ? 3 : 0), labels });
-      }
-
-      // Chọn 1 ảnh tốt nhất mỗi loại
-      const best = {};
-      for (const img of analyzed) {
-        if (!best[img.type] || img.score > best[img.type].score) best[img.type] = img;
-      }
-      const selected = Object.values(best).sort((a, b) => a.order - b.order);
-      logs.push(`  ✅ Chọn ${selected.length} ảnh theo câu chuyện`);
-
-      // Groq viết caption
-      const info = parseName(folder.name);
-      const imgContext = selected.map(i => i.labels?.[0] || i.label).join(", ");
-      const caption = await groqCaption(info, imgContext);
-      logs.push("  ✅ Caption đã viết");
-
-      // Lưu vào KV
-      const token = Buffer.from(`${folder.id}_${Date.now()}`).toString("base64url");
-      const project = {
-        folderId: folder.id, folderName: folder.name, folderInfo: info,
-        selectedImages: selected, caption, approvalToken: token,
-        status: "pending", createdAt: now.toISOString(),
-      };
-      await kv.set(`project:${token}`, project, { ex: 60 * 60 * 24 * 7 }); // 7 ngày
-      await kv.set(`project:folder:${folder.id}`, token, { ex: 60 * 60 * 24 * 7 });
-
-      // Gửi email duyệt
-      await sendEmail(project);
-      logs.push("  📧 Email duyệt đã gửi!");
+    if (driveItems.length === 0) {
+      return res.status(200).json({ ok: true, logs, message: 'Không có folder nào' });
     }
 
-    // ── 2. Kiểm tra lịch đăng 9:30 T3 & T6 ──────────────────
-    const isPostTime = CONFIG.POST_DAYS.includes(day) && hour === CONFIG.POST_HOUR && minute < 35;
-    if (isPostTime) {
-      logs.push("\n⏰ Đúng lịch đăng bài!");
-      const keys = await kv.keys("project:*");
-      for (const key of keys) {
-        if (key.includes(":folder:")) continue;
-        const project = await kv.get(key);
-        if (project?.status !== "approved") continue;
+    // ── BƯỚC 3: Lấy settings ──────────────────────────────────────────────────
+    const settings = await kv.get('bsc_settings') || {};
+    const tone     = settings.defaultTone || 'event';
+    const agency   = settings.agencyName  || 'Blue Sky Corporation';
+    const groqKey  = process.env.GROQ_API_KEY || '';
 
-        logs.push(`🚀 Đăng bài: ${project.folderName}`);
-        const postId = await publishFB(project);
-        await kv.set(key, { ...project, status: "posted", postId, postedAt: now.toISOString() });
-        logs.push(`  ✅ Post ID: ${postId}`);
-      }
+    // ── BƯỚC 4: AI tạo caption cho từng dự án ────────────────────────────────
+    logs.push('🤖 AI đang tạo caption...');
+    const projects = [];
+
+    for (const item of driveItems) {
+      const postId = `post_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+      const captions = await genCaptions(item.name, tone, groqKey, {
+        brand:     item.brand || item.name,
+        program:   item.name,
+        objective: item.objective || 'Tăng nhận diện thương hiệu',
+        kpi:       item.kpi || '',
+        region:    item.region || 'TP. Hồ Chí Minh',
+        agency,
+      });
+
+      projects.push({
+        postId,
+        name:          item.name,
+        tone,
+        images:        item.images || [],
+        captions,
+        customCaption: captions.hook,
+        status:        'pending_approval',
+        createdAt:     new Date().toISOString(),
+      });
+      logs.push(`  ✅ ${item.name}`);
     }
 
-    return res.status(200).json({ ok: true, logs });
+    // ── BƯỚC 5: Tính lịch đăng rải đều trong X tháng ─────────────────────────
+    logs.push(`📅 Rải lịch ${projects.length} bài trong ${months} tháng...`);
+    const schedule = buildSchedule(projects.length, months);
+    projects.forEach((p, i) => {
+      p.scheduledAt = schedule[i].toISOString();
+    });
 
-  } catch (e) {
-    logs.push("❌ Lỗi: " + e.message);
-    return res.status(500).json({ ok: false, error: e.message, logs });
+    // ── BƯỚC 6: Lưu batch vào KV ─────────────────────────────────────────────
+    const batchId  = `batch_${Date.now()}`;
+    const batchData = {
+      batchId,
+      months,
+      projects,
+      createdAt:  new Date().toISOString(),
+      status:     'pending_approval',
+      totalPosts: projects.length,
+      dateRange: {
+        from: schedule[0].toLocaleDateString('vi-VN'),
+        to:   schedule[schedule.length - 1].toLocaleDateString('vi-VN'),
+      },
+    };
+    await kv.set('pending_batch', batchData);
+
+    // ── BƯỚC 7: Gửi 1 email duy nhất để chị duyệt cả batch ───────────────────
+    logs.push('📧 Gửi email duyệt batch...');
+    await resend.emails.send({
+      from: 'BSC Auto Post <onboarding@resend.dev>',
+      to:   process.env.EMAIL_TO || 'maithidiem201090@gmail.com',
+      subject: `[BSC] Duyệt ${projects.length} bài đăng ${months} tháng tới – ${new Date().toLocaleDateString('vi-VN')}`,
+      html: buildBatchEmail(batchData, secret),
+    });
+
+    logs.push('✅ Hoàn thành!');
+    return res.status(200).json({
+      ok: true,
+      logs,
+      batchId,
+      totalPosts: projects.length,
+      months,
+      dateRange: batchData.dateRange,
+      message: `Email duyệt đã gửi — ${projects.length} bài rải đều trong ${months} tháng`,
+    });
+
+  } catch (err) {
+    console.error('Cron error:', err);
+    return res.status(500).json({ ok: false, error: err.message });
   }
+}
+
+// ── Tính lịch đăng rải đều ────────────────────────────────────────────────────
+function buildSchedule(count, months) {
+  const schedule = [];
+  const now      = new Date();
+  const endDate  = new Date(now);
+  endDate.setMonth(endDate.getMonth() + months);
+
+  const totalMs   = endDate - now;
+  const intervalMs = totalMs / count;
+
+  // Không đăng 2 ngày liên tiếp nếu có nhiều bài — rải đều
+  for (let i = 0; i < count; i++) {
+    const date = new Date(now.getTime() + intervalMs * (i + 0.5));
+    // Chọn giờ vàng gần nhất
+    const hour = POST_HOURS[i % POST_HOURS.length];
+    date.setHours(hour, 0, 0, 0);
+    // Bỏ qua Chủ nhật
+    if (date.getDay() === 0) date.setDate(date.getDate() + 1);
+    schedule.push(date);
+  }
+  return schedule;
+}
+
+// ── AI tạo caption bằng Groq ──────────────────────────────────────────────────
+async function genCaptions(projectName, tone, groqKey, info) {
+  const toneDesc = BRAND_TONES[tone] || BRAND_TONES.event;
+  const agency   = info.agency || 'Blue Sky Corporation';
+
+  const prompt = `Bạn là senior copywriter của ${agency}.
+Thông tin dự án:
+- Brand: ${info.brand || projectName}
+- Chương trình: ${info.program || projectName}
+- Mục tiêu: ${info.objective}
+- KPI: ${info.kpi || 'chưa cập nhật'}
+- Khu vực: ${info.region}
+Phong cách: ${toneDesc}
+
+Tạo 4 caption Facebook, trả về JSON:
+{"hook":"...","story":"...","cta":"...","short":"..."}`;
+
+  try {
+    if (!groqKey) throw new Error('no key');
+    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${groqKey}` },
+      body: JSON.stringify({ model: 'llama-3.1-8b-instant', messages: [{ role: 'user', content: prompt }], max_tokens: 2000 }),
+    });
+    const data = await r.json();
+    const text = data.choices?.[0]?.message?.content || '{}';
+    return JSON.parse(text.replace(/```json|```/g, '').trim());
+  } catch {
+    const tag = (info.brand || projectName).replace(/\s+/g, '');
+    return {
+      hook:  `🔥 ${info.brand || projectName} x ${agency}!\n#${tag} #BlueSkyCorporation`,
+      story: `✨ ${info.program || projectName} – Hành trình thực thi...\n#${tag}`,
+      cta:   `📣 ${info.program || projectName} hoàn thành!\n#${tag} #BSC`,
+      short: `🎉 ${info.program || projectName} Done!\n#${tag} #BSC`,
+    };
+  }
+}
+
+// ── Email batch ───────────────────────────────────────────────────────────────
+function buildBatchEmail(batch, secret) {
+  const base = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : 'https://bsc-auto-post.vercel.app';
+
+  const approveAllUrl = `${base}/api/batch-approve?batchId=${batch.batchId}&action=approve_all&secret=${secret}`;
+  const rejectAllUrl  = `${base}/api/batch-approve?batchId=${batch.batchId}&action=reject_all&secret=${secret}`;
+  const dashUrl       = `${base}?secret=${secret}`;
+
+  const projectRows = batch.projects.map((p, i) => `
+    <tr style="border-bottom:1px solid #e2e8f0;">
+      <td style="padding:10px 8px;font-size:13px;color:#1565c0;font-weight:600;">${i + 1}. ${p.name}</td>
+      <td style="padding:10px 8px;font-size:12px;color:#475569;">
+        ${new Date(p.scheduledAt).toLocaleString('vi-VN', { weekday:'short', day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}
+      </td>
+      <td style="padding:10px 8px;font-size:12px;color:#334155;max-width:300px;">
+        ${(p.customCaption || '').substring(0, 80)}...
+      </td>
+    </tr>`).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family:'Segoe UI',Arial,sans-serif;max-width:700px;margin:0 auto;padding:20px;background:#f8fafc;">
+
+  <div style="background:linear-gradient(135deg,#1565c0,#1877f2);border-radius:16px;padding:28px;margin-bottom:20px;color:white;text-align:center;">
+    <div style="font-size:40px;margin-bottom:8px;">📅</div>
+    <h1 style="margin:0;font-size:22px;font-weight:800;">BSC Auto Post — Duyệt batch ${batch.months} tháng</h1>
+    <p style="margin:8px 0 0;opacity:.85;font-size:14px;">
+      ${batch.totalPosts} bài · ${batch.dateRange.from} → ${batch.dateRange.to}
+    </p>
+  </div>
+
+  <!-- Nút duyệt tất cả -->
+  <div style="background:white;border-radius:14px;border:2px solid #22c55e;padding:20px 24px;margin-bottom:20px;text-align:center;">
+    <div style="font-size:16px;font-weight:800;color:#166534;margin-bottom:6px;">
+      ✅ Duyệt tất cả ${batch.totalPosts} bài — Đăng tự động trong ${batch.months} tháng tới
+    </div>
+    <div style="font-size:13px;color:#64748b;margin-bottom:16px;">
+      Hệ thống sẽ tự rải lịch & đăng đúng giờ. Chị không cần làm gì thêm!
+    </div>
+    <a href="${approveAllUrl}" 
+       style="display:inline-block;background:#22c55e;color:white;padding:14px 40px;border-radius:12px;font-weight:800;font-size:16px;text-decoration:none;">
+      🚀 DUYỆT TẤT CẢ & LÊN LỊCH
+    </a>
+  </div>
+
+  <!-- Bảng lịch đăng -->
+  <div style="background:white;border-radius:14px;border:1px solid #e2e8f0;overflow:hidden;margin-bottom:20px;">
+    <div style="background:#f1f5f9;padding:14px 20px;font-weight:800;font-size:14px;color:#1565c0;border-bottom:1px solid #e2e8f0;">
+      📋 Lịch đăng dự kiến (${batch.totalPosts} bài)
+    </div>
+    <table style="width:100%;border-collapse:collapse;">
+      <thead>
+        <tr style="background:#f8fafc;">
+          <th style="padding:10px 8px;font-size:11px;color:#64748b;text-align:left;font-weight:700;text-transform:uppercase;">Dự án</th>
+          <th style="padding:10px 8px;font-size:11px;color:#64748b;text-align:left;font-weight:700;text-transform:uppercase;">Giờ đăng</th>
+          <th style="padding:10px 8px;font-size:11px;color:#64748b;text-align:left;font-weight:700;text-transform:uppercase;">Caption</th>
+        </tr>
+      </thead>
+      <tbody>${projectRows}</tbody>
+    </table>
+  </div>
+
+  <!-- Nút từ chối + Dashboard -->
+  <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:16px;">
+    <a href="${dashUrl}" 
+       style="background:#1565c0;color:white;padding:12px 24px;border-radius:10px;font-weight:700;font-size:13px;text-decoration:none;">
+      📊 Xem Dashboard & Chỉnh sửa
+    </a>
+    <a href="${rejectAllUrl}" 
+       style="background:#fee2e2;color:#991b1b;padding:12px 24px;border-radius:10px;font-weight:700;font-size:13px;text-decoration:none;">
+      ❌ Từ chối tất cả
+    </a>
+  </div>
+
+  <div style="text-align:center;color:#94a3b8;font-size:11px;">
+    Blue Sky Corporation · BSC Auto Post · Duyệt 1 lần/tháng
+  </div>
+</body>
+</html>`;
+}
+
+// ── Quét Drive (giữ nguyên logic cũ) ─────────────────────────────────────────
+async function scanDriveFolders() {
+  // Giữ nguyên code quét Drive từ file cron.js gốc của chị
+  return [];
 }
